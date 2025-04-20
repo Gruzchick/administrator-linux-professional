@@ -1,0 +1,94 @@
+#!/bin/bash
+
+# Для того чтобы скрип не включался пока работает другой скрипт, используется lock файл
+
+# Скрипт запускается, смотри временную метку последнег лога который он обрабатывал. Если временной метки нет, то она с конца файла обрабатывает, все логи на час раньше последнего лога, если временная метка есть (тоесть скрипт уже запускался, то он обрабатывает все логи с конца файла и до последней временной метки)
+
+LOG_FILE="./access-4560-644067.log"
+LOCK_FILE="./log_report.lock"
+RESULT_FILE="./log_report_result.txt"
+LAST_RUN_FILE="./log_report_last_run"
+EMAIL="pankinsasha24@gmail.com"
+
+# Предотвращение параллельного запуска
+exec 200>$LOCK_FILE
+flock -n 200 || exit 1
+
+TMP_FILE=$(mktemp ./tmpfile.XXXXXX)
+
+# Определяем начало периода
+if [ -f "$LAST_RUN_FILE" ]; then
+    START_TS=$(cat "$LAST_RUN_FILE")
+else
+    # Лог отсортирован, берём последнюю строку
+    LAST_LINE=$(tail -n 1 "$LOG_FILE")
+    DATE_STR=$(echo "$LAST_LINE" | grep -oP '\[\K[^]]+')
+    TS=$(date -d "$(echo "$DATE_STR" | sed -e 's,/,-,g' -e 's,:, ,')" +%s 2>/dev/null)
+    START_TS=$((TS - 3600))
+    [ "$START_TS" -lt 0 ] && START_TS=0
+fi
+
+MAX_TS=0
+
+#echo $START_TS
+
+# Обработка лога — фильтрация по времени
+while read -r line; do
+
+    DATE_STR=$(echo "$line" | grep -oP '\[\K[^]]+')
+    [ -z "$DATE_STR" ] && continue
+
+    TS=$(date -d "$(echo "$DATE_STR" | sed -e 's,/,-,g' -e 's,:, ,')" +%s 2>/dev/null)
+    [ -z "$TS" ] && continue
+
+    [ "$TS" -gt "$MAX_TS" ] && MAX_TS=$TS
+
+    echo $MAX_TS
+
+    if [ "$TS" -gt "$START_TS" ]; then
+        echo "$line" >> "$TMP_FILE"
+    else
+        break
+    fi
+done < <(tac "$LOG_FILE")
+
+echo $MAX_TS
+
+# Если ничего не попало — сохраняем START_TS как MAX_TS
+[ "$MAX_TS" -eq 0 ] && MAX_TS=$START_TS
+
+# Составляем отчёт
+{
+    echo "Отчёт с $(date -d "@$START_TS") по $(date -d "@$MAX_TS"):"
+    echo
+
+    echo "Топ IP:"
+    awk '{print $1}' "$TMP_FILE" | sort | uniq -c | sort -rn | head -10
+    echo
+
+    echo "Топ URL:"
+    awk -F'"' '{print $2}' "$TMP_FILE" | awk '{print $2}' | sort | uniq -c | sort -rn | head -10
+    echo
+
+    echo "Ошибки сервера (все ответы кроме 2xx):"
+    awk '$9 !~ /^2/' "$TMP_FILE" | awk '{print $9}' | sort | uniq -c | sort -rn
+    echo
+
+    echo "HTTP-коды:"
+    awk '{print $9}' "$TMP_FILE" | sort | uniq -c | sort -rn
+    echo
+} > "$RESULT_FILE"
+
+# Отправка отчёта
+if command -v mail >/dev/null 2>&1; then
+    mail -s "CRON лог-отчет" "$EMAIL" < "$RESULT_FILE"
+else
+    echo "⚠ mail не установлен. Вот отчёт:"
+    cat "$RESULT_FILE"
+fi
+
+# Сохраняем максимум для следующего запуска
+echo "$MAX_TS" > "$LAST_RUN_FILE"
+
+# Очистка
+rm -f "$TMP_FILE"
