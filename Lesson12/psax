@@ -1,0 +1,46 @@
+#!/bin/bash
+
+printf "%-6s %-8s %-5s %-8s %s\n" "PID" "TTY" "STAT" "TIME" "COMMAND"
+
+process_list=()
+
+for pid_path in /proc/[0-9]*; do
+    pid=${pid_path##*/}
+
+    if [ -r "/proc/$pid/stat" ]; then
+        # Извлекаем данные
+        tty_nr=$(awk '{print $7}' /proc/$pid/stat)
+        stat_code=$(awk '{print $3}' /proc/$pid/stat)
+        utime=$(awk '{print $14}' /proc/$pid/stat)
+        stime=$(awk '{print $15}' /proc/$pid/stat)
+        total_time=$((utime + stime))
+
+        # Преобразуем jiffies в секунды (предполагаем 100 Hz)
+        seconds=$((total_time / 100))
+        minutes=$((seconds / 60))
+        rem_seconds=$((seconds % 60))
+        time_fmt=$(printf "%02d:%02d" "$minutes" "$rem_seconds")
+
+        # Определяем TTY
+        tty="?"
+        if [[ "$tty_nr" != "0" ]]; then
+            tty_link=$(ls -l /proc/$pid/fd/0 2>/dev/null | awk '{print $NF}')
+            tty=$(basename "$tty_link" 2>/dev/null)
+        fi
+
+        # Получаем команду
+        if [ -r "/proc/$pid/cmdline" ]; then
+            cmd=$(tr '\0' ' ' < /proc/$pid/cmdline)
+        fi
+        if [ -z "$cmd" ] && [ -r "/proc/$pid/comm" ]; then
+            cmd=$(< /proc/$pid/comm)
+        fi
+
+        process_list+=("$pid|$tty|$stat_code|$time_fmt|$cmd")
+    fi
+done
+
+# Вывод
+printf "%s\n" "${process_list[@]}" | sort -n | while IFS='|' read -r pid tty stat_code time_fmt cmd; do
+    printf "%-6s %-8s %-5s %-8s %s\n" "$pid" "$tty" "$stat_code" "$time_fmt" "$cmd"
+done
